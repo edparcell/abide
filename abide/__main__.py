@@ -1,11 +1,14 @@
 import logging
 import pathlib
-import re
 import subprocess
 import sys
 import time
 from datetime import datetime
+from typing import List
+
 import nbformat
+import yaml
+from croniter import croniter
 from nbconvert.preprocessors import ExecutePreprocessor
 from nbconvert import PDFExporter
 
@@ -45,10 +48,6 @@ def run_notebook(input_notebook: pathlib.Path, run_path: pathlib.Path, output_no
         f_pdf_out.write(pdf_data)
 
 
-
-TIMESPEC_FILENAME = re.compile(r'(?P<timespec>\d{4})-(?P<taskname>.*)\.(?P<extension>py|ipynb)')
-
-
 @attr.s(auto_attribs=True)
 class TaskDefinition:
     timespec: str
@@ -56,56 +55,42 @@ class TaskDefinition:
     extension: str
     filename: pathlib.Path
 
-    @staticmethod
-    def from_filename(filename):
-        filename = pathlib.Path(filename)
-        m = TIMESPEC_FILENAME.match(filename.name)
-        if m is None:
-            logging.warning('{} is not valid filename'.format(filename.name))
-            return None
-        timespec = m.group('timespec')
-        name = m.group('taskname')
-        extension = m.group('extension')
-        return TaskDefinition(timespec, name, extension, filename)
-
     def execute(self, dt):
-        if self.extension.lower() == 'py':
+        if self.extension.lower() == '.py':
             logging.info("Executing {} {}".format(sys.executable, str(self.filename)))
             subprocess.call([sys.executable, str(self.filename)])
-        elif self.extension.lower() == 'ipynb':
+        elif self.extension.lower() == '.ipynb':
             logging.info("Running notebook {}".format(self.filename))
             pth = self.filename.parent
             pth_out = pth / self.name
             pth_out.mkdir(exist_ok=True)
             fn_out = pth_out / '{}-{:%Y%m%d}.ipynb'.format(self.name, dt)
             run_notebook(self.filename, pth, fn_out)
+        else:
+            logging.error("Unexpected extension: {}".format(self.extension))
 
     def get_last_scheduled_execution(self, current_time: datetime):
-        hour, minute = int(self.timespec[:2]), int(self.timespec[2:])
-        execution_time = datetime(current_time.year, current_time.month, current_time.day, hour, minute)
-        if execution_time > current_time:
-            execution_time = datetime(current_time.year, current_time.month, current_time.day - 1, hour, minute)
+        ci = croniter(self.timespec, current_time)
+        execution_time = ci.get_prev(ret_type=datetime)
         logging.debug("Current Time: {}, Last Scheduled Execution: {}".format(current_time, execution_time))
         return execution_time
 
 
-def get_tasks_for_dir(task_directory: pathlib.Path):
-    task_list = []
-    python_files = list(task_directory.glob('*.py'))
-    ipynb_files = list(task_directory.glob('*.ipynb'))
-    for python_file in python_files + ipynb_files:
-        task_definition = TaskDefinition.from_filename(python_file)
-        if task_definition is not None:
-            task_list.append(task_definition)
-    return task_list
+def get_schedule_for_dir(task_directory: pathlib.Path) -> List[TaskDefinition]:
+    schedule_file = task_directory / 'schedule.yaml'
+    with schedule_file.open() as f:
+        schedule_items = yaml.load(f, Loader=yaml.CLoader)
+        schedule = []
+        for name, task in schedule_items.items():
+            pth = pathlib.Path(task['file'])
+            td = TaskDefinition(task['schedule'], name, pth.suffix, pth)
+            schedule.append(td)
+    return schedule
 
 
 def get_task(task_directory: pathlib.Path, task_name: str):
-    task_list = get_tasks_for_dir(task_directory)
-    for task in task_list:
-        if task.name == task_name or task.filename.name == task_name:
-            return task
-    return None
+    schedule = get_schedule_for_dir(task_directory)
+    return schedule.get(task_name)
 
 
 def run_main_loop(task_directory: pathlib.Path, sleep_period=1):
@@ -114,8 +99,8 @@ def run_main_loop(task_directory: pathlib.Path, sleep_period=1):
         logging.debug("Waking up")
         this_run_time = datetime.utcnow()
 
-        task_list = get_tasks_for_dir(task_directory)
-        for task in task_list:
+        schedule = get_schedule_for_dir(task_directory)
+        for task in schedule:
             task_last_run_time = last_run_time
             task_last_scheduled_execution = task.get_last_scheduled_execution(this_run_time)
             if task_last_scheduled_execution > task_last_run_time:
@@ -149,8 +134,9 @@ def tasks():
 def list_tasks(task_directory: str, verbose: int):
     init_logging(verbose)
     task_directory = pathlib.Path(task_directory)
-    task_list = get_tasks_for_dir(task_directory)
-    print(task_list)
+    schedule = get_schedule_for_dir(task_directory)
+    for task in schedule:
+        print('{}\t{}\t{}'.format(task.name, task.timespec, task.filename))
 
 
 @tasks.command(name='run')
