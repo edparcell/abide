@@ -56,21 +56,6 @@ class TaskDefinition:
     extension: str
     filename: pathlib.Path
 
-    def execute(self, dt):
-        env = os.environ.copy()
-        if self.extension.lower() == '.py':
-            logging.info("Executing {} {}".format(sys.executable, str(self.filename)))
-            subprocess.run([sys.executable, str(self.filename)], env=env)
-        elif self.extension.lower() == '.ipynb':
-            logging.info("Running notebook {}".format(self.filename))
-            pth = self.filename.parent
-            pth_out = pth / self.name
-            pth_out.mkdir(exist_ok=True)
-            fn_out = pth_out / '{}-{:%Y%m%d}.ipynb'.format(self.name, dt)
-            run_notebook(self.filename, pth, fn_out)
-        else:
-            logging.error("Unexpected extension: {}".format(self.extension))
-
     def get_last_scheduled_execution(self, current_time: datetime):
         ci = croniter(self.timespec, current_time)
         execution_time = ci.get_prev(ret_type=datetime)
@@ -97,6 +82,37 @@ class TaskDirectory:
         schedule = self.get_schedule()
         return schedule.get(task_name)
 
+    def get_task_output_dir(self, task_name: str):
+        return self.task_directory / 'output' / task_name
+
+    def get_task_run_output_dir(self, task_name: str, execute_time: datetime):
+        return self.get_task_output_dir(task_name) / '{:%Y%m%d-%H%M%S}'.format(execute_time)
+
+    def get_task_run_output_filename(self, task_name: str, execute_time: datetime, extension):
+        return self.get_task_output_dir(task_name) / '{:%Y%m%d-%H%M%S}.{}'.format(execute_time, extension)
+
+
+def execute_task(task_definition: TaskDefinition, task_directory: TaskDirectory, execute_time: datetime):
+    pth_task_dir = task_directory.get_task_output_dir(task_definition.name)
+    pth_task_run_dir = task_directory.get_task_run_output_dir(task_definition.name, execute_time)
+    env = os.environ.copy()
+    env['ABIDE_TASK_PATH'] = str(pth_task_dir)
+    env['ABIDE_TASK_RUN_PATH'] = str(pth_task_run_dir)
+
+    extn = task_definition.extension.lower()
+    task_filename = str(task_definition.filename)
+
+    if extn == '.py':
+        logging.info("Executing {} {}".format(sys.executable, task_filename))
+        subprocess.run([sys.executable, task_filename], env=env)
+    elif extn == '.ipynb':
+        logging.info("Running notebook {}".format(task_filename))
+        pth = task_directory.task_directory
+        fn_out = task_directory.get_task_run_output_filename(task_definition.name, execute_time, 'ipynb')
+        run_notebook(task_definition.filename, pth, fn_out)
+    else:
+        logging.error("Unexpected extension: {}".format(extn))
+
 
 def run_main_loop(task_directory: TaskDirectory, sleep_period=1):
     last_run_time = datetime.utcnow()
@@ -111,7 +127,7 @@ def run_main_loop(task_directory: TaskDirectory, sleep_period=1):
             if task_last_scheduled_execution > task_last_run_time:
                 logging.debug("Running Task {}, Last Task Run Time: {}, Last Scheduled Execution: {}".format(
                     task.name, task_last_run_time, task_last_scheduled_execution))
-                task.execute(this_run_time)
+                execute_task(task, task_directory, task_last_scheduled_execution)
 
         last_run_time = this_run_time
         logging.debug("Sleeping for {} seconds".format(sleep_period))
@@ -152,7 +168,7 @@ def list_tasks(task_directory: str, verbose: int, task_name: str):
     init_logging(verbose)
     task_directory = TaskDirectory(task_directory)
     task = task_directory.get_task(task_name)
-    task.execute(datetime.utcnow())
+    execute_task(task, task_directory, datetime.utcnow())
 
 
 @top_level.command()
@@ -160,9 +176,9 @@ def list_tasks(task_directory: str, verbose: int, task_name: str):
 @click.option('-v', '--verbose', count=True)
 def server(task_directory: str, verbose: int):
     init_logging(verbose)
-    task_directory = pathlib.Path(task_directory)
+    task_directory = TaskDirectory(task_directory)
 
-    logging.info("Running tasks from: {}".format(task_directory.absolute()))
+    logging.info("Running tasks from: {}".format(task_directory.task_directory.absolute()))
     logging.info("Verbosity: {}".format(verbose))
     run_main_loop(task_directory)
 
