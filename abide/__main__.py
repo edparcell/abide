@@ -1,10 +1,11 @@
 import logging
+import os
 import pathlib
 import subprocess
 import sys
 import time
 from datetime import datetime
-from typing import List
+from typing import List, Dict
 
 import nbformat
 import yaml
@@ -56,9 +57,10 @@ class TaskDefinition:
     filename: pathlib.Path
 
     def execute(self, dt):
+        env = os.environ.copy()
         if self.extension.lower() == '.py':
             logging.info("Executing {} {}".format(sys.executable, str(self.filename)))
-            subprocess.call([sys.executable, str(self.filename)])
+            subprocess.run([sys.executable, str(self.filename)], env=env)
         elif self.extension.lower() == '.ipynb':
             logging.info("Running notebook {}".format(self.filename))
             pth = self.filename.parent
@@ -76,31 +78,34 @@ class TaskDefinition:
         return execution_time
 
 
-def get_schedule_for_dir(task_directory: pathlib.Path) -> List[TaskDefinition]:
-    schedule_file = task_directory / 'schedule.yaml'
-    with schedule_file.open() as f:
-        schedule_items = yaml.load(f, Loader=yaml.CLoader)
-        schedule = []
-        for name, task in schedule_items.items():
-            pth = pathlib.Path(task['file'])
-            td = TaskDefinition(task['schedule'], name, pth.suffix, pth)
-            schedule.append(td)
-    return schedule
+class TaskDirectory:
+    def __init__(self, task_directory):
+        self.task_directory = pathlib.Path(task_directory)
+
+    def get_schedule(self) -> Dict[str, TaskDefinition]:
+        schedule_file = self.task_directory / 'schedule.yaml'
+        with schedule_file.open() as f:
+            schedule_items = yaml.load(f, Loader=yaml.CLoader)
+            schedule = {}
+            for name, task in schedule_items.items():
+                pth = pathlib.Path(task['file'])
+                td = TaskDefinition(task['schedule'], name, pth.suffix, pth)
+                schedule[name] = td
+        return schedule
+
+    def get_task(self, task_name: str):
+        schedule = self.get_schedule()
+        return schedule.get(task_name)
 
 
-def get_task(task_directory: pathlib.Path, task_name: str):
-    schedule = get_schedule_for_dir(task_directory)
-    return schedule.get(task_name)
-
-
-def run_main_loop(task_directory: pathlib.Path, sleep_period=1):
+def run_main_loop(task_directory: TaskDirectory, sleep_period=1):
     last_run_time = datetime.utcnow()
     while True:
         logging.debug("Waking up")
         this_run_time = datetime.utcnow()
 
-        schedule = get_schedule_for_dir(task_directory)
-        for task in schedule:
+        schedule = task_directory.get_schedule()
+        for task in schedule.values():
             task_last_run_time = last_run_time
             task_last_scheduled_execution = task.get_last_scheduled_execution(this_run_time)
             if task_last_scheduled_execution > task_last_run_time:
@@ -133,9 +138,9 @@ def tasks():
 @click.option('-v', '--verbose', count=True)
 def list_tasks(task_directory: str, verbose: int):
     init_logging(verbose)
-    task_directory = pathlib.Path(task_directory)
-    schedule = get_schedule_for_dir(task_directory)
-    for task in schedule:
+    task_directory = TaskDirectory(task_directory)
+    schedule = task_directory.get_schedule()
+    for task in schedule.values():
         print('{}\t{}\t{}'.format(task.name, task.timespec, task.filename))
 
 
@@ -145,8 +150,8 @@ def list_tasks(task_directory: str, verbose: int):
 @click.option('-v', '--verbose', count=True)
 def list_tasks(task_directory: str, verbose: int, task_name: str):
     init_logging(verbose)
-    task_directory = pathlib.Path(task_directory)
-    task = get_task(task_directory, task_name)
+    task_directory = TaskDirectory(task_directory)
+    task = task_directory.get_task(task_name)
     task.execute(datetime.utcnow())
 
 
