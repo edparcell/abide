@@ -83,13 +83,16 @@ class TaskDirectory:
         return schedule.get(task_name)
 
     def get_task_output_dir(self, task_name: str):
-        return self.task_directory / 'output' / task_name
+        pth = self.task_directory / 'output' / task_name
+        return pth.absolute()
 
     def get_task_run_output_dir(self, task_name: str, execute_time: datetime):
-        return self.get_task_output_dir(task_name) / '{:%Y%m%d-%H%M%S}'.format(execute_time)
+        pth = self.get_task_output_dir(task_name) / '{:%Y%m%d-%H%M%S}'.format(execute_time)
+        return pth.absolute()
 
     def get_task_run_output_filename(self, task_name: str, execute_time: datetime, extension):
-        return self.get_task_output_dir(task_name) / '{:%Y%m%d-%H%M%S}.{}'.format(execute_time, extension)
+        pth = self.get_task_output_dir(task_name) / '{:%Y%m%d-%H%M%S}.{}'.format(execute_time, extension)
+        return pth.absolute()
 
 
 def execute_task(task_definition: TaskDefinition, task_directory: TaskDirectory, execute_time: datetime):
