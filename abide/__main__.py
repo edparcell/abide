@@ -7,6 +7,7 @@ import time
 from datetime import datetime
 import nbformat
 from nbconvert.preprocessors import ExecutePreprocessor
+from nbconvert import PDFExporter
 
 import attr
 import click
@@ -29,13 +30,20 @@ def init_logging(verbose):
     logging.root.setLevel(loglevel)
 
 
-def run_notebook(input_notebook, run_path, output_notebook, timeout=600):
+def run_notebook(input_notebook: pathlib.Path, run_path: pathlib.Path, output_notebook: pathlib.Path, timeout: int=600):
     with open(input_notebook) as f_in:
         nb = nbformat.read(f_in, as_version=4)
     ep = ExecutePreprocessor(timeout=timeout, kernel_name='python3')
     ep.preprocess(nb, {'metadata': {'path': run_path}})
     with open(output_notebook, 'w', encoding='utf-8') as f_out:
         nbformat.write(nb, f_out)
+
+    pdf_exporter = PDFExporter()
+    pdf_exporter.template_name = 'classic'
+    pdf_data, resources = pdf_exporter.from_notebook_node(nb)
+    with open(output_notebook.with_suffix(".pdf"), 'wb') as f_pdf_out:
+        f_pdf_out.write(pdf_data)
+
 
 
 TIMESPEC_FILENAME = re.compile(r'(?P<timespec>\d{4})-(?P<taskname>.*)\.(?P<extension>py|ipynb)')
@@ -61,14 +69,15 @@ class TaskDefinition:
         return TaskDefinition(timespec, name, extension, filename)
 
     def execute(self, dt):
-        logging.info("Excuting {} {}".format(sys.executable, str(self.filename)))
         if self.extension.lower() == 'py':
+            logging.info("Executing {} {}".format(sys.executable, str(self.filename)))
             subprocess.call([sys.executable, str(self.filename)])
         elif self.extension.lower() == 'ipynb':
+            logging.info("Running notebook {}".format(self.filename))
             pth = self.filename.parent
             pth_out = pth / self.name
             pth_out.mkdir(exist_ok=True)
-            fn_out = pth_out / '{:%Y%m%d}.ipynb'.format(dt)
+            fn_out = pth_out / '{}-{:%Y%m%d}.ipynb'.format(self.name, dt)
             run_notebook(self.filename, pth, fn_out)
 
     def get_last_scheduled_execution(self, current_time: datetime):
@@ -76,6 +85,7 @@ class TaskDefinition:
         execution_time = datetime(current_time.year, current_time.month, current_time.day, hour, minute)
         if execution_time > current_time:
             execution_time = datetime(current_time.year, current_time.month, current_time.day - 1, hour, minute)
+        logging.debug("Current Time: {}, Last Scheduled Execution: {}".format(current_time, execution_time))
         return execution_time
 
 
@@ -109,6 +119,8 @@ def run_main_loop(task_directory: pathlib.Path, sleep_period=1):
             task_last_run_time = last_run_time
             task_last_scheduled_execution = task.get_last_scheduled_execution(this_run_time)
             if task_last_scheduled_execution > task_last_run_time:
+                logging.debug("Running Task {}, Last Task Run Time: {}, Last Scheduled Execution: {}".format(
+                    task.name, task_last_run_time, task_last_scheduled_execution))
                 task.execute(this_run_time)
 
         last_run_time = this_run_time
