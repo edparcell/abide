@@ -1,55 +1,111 @@
-import io
-import os
-import subprocess
-import sys
 import uuid
-from typing import Dict, List
+from threading import Thread, Event, Lock
+from queue import SimpleQueue, Empty
+from enum import Enum
 import attr
-from threading import Thread
 
 
-@attr.s
-class Process:
-    upid: str = attr.ib()
-    process_object: object = attr.ib()
-    stdout: io.TextIOBase = attr.ib(default=attr.Factory(io.BytesIO))
-    stderr: io.TextIOBase = attr.ib(default=attr.Factory(io.BytesIO))
+@attr.s(auto_attribs=True)
+class LogMessage:
+    sender: str
+    text: str
+
+
+@attr.s(auto_attribs=True)
+class CompletionMessage:
+    sender: str
+    pct_complete: float  # range 0-100
+
+
+@attr.s(auto_attribs=True)
+class Done:
+    sender: str
+
+
+class Job:
+    def __init__(self):
+        self.executor = None
+        self.ident = None
+        self.cancel_event = None
+        self.thread = None
+        self.is_done = False
+
+    def start(self, executor, ident):
+        if self.executor is not None:
+            raise Exception("Can only start job once")
+        self.executor = executor
+        self.ident = ident
+        self.cancel_event = Event()
+        self.thread = Thread(target=self._run, name='Job-Thread-' + ident, daemon=True)
+        self.thread.start()
+
+    def cancel(self):
+        self.cancel_event.set()
+
+    def is_canceled(self):
+        return self.cancel_event.is_set()
+
+    def wait(self, timeout):
+        self.cancel_event.wait(timeout)
+
+    def _emit_message(self, msg):
+        self.executor._internal_report_q.put(msg)
+
+    def emit_log_message(self, text):
+        self._emit_message(LogMessage(self.ident, text))
+
+    def emit_completion(self, pct_complete):
+        self._emit_message(CompletionMessage(self.ident, pct_complete))
+
+    def emit_done(self):
+        if not self.is_done:
+            self._emit_message(Done(self.ident))
+        self.is_done = True
+
+    def _run(self):
+        self.run()
+        self.emit_done()
+
+    def run(self):
+        pass
 
 
 class Executor:
     def __init__(self):
-        self.process_table = {}
+        self.jobs = {}
+        self.active_jobs = []
+        self.job_table_lock = Lock()
+        self.cancel_event = Event()
+        self._internal_report_q = SimpleQueue()
+        self.report_q = SimpleQueue()
+        self.thread = Thread(target=self._background_run, name='Executor-Thread')
+        self.thread.start()
 
-    def execute_python_script(self, filename, args: [str] = None, env_vars: Dict[str, str] = None,
-                              stdout_file: io.TextIOBase = None, stderr_file: io.TextIOBase = None, cwd=None):
-        upid = str(uuid.uuid4())
-        process = Process(upid, None)
+    def run(self, job):
+        jid = str(uuid.uuid4())
+        with self.job_table_lock:
+            self.jobs[jid] = job
+            self.active_jobs.append(jid)
+        job.start(self, jid)
 
-        args_popen = [sys.executable, str(filename)]
-        if args is not None:
-            args_popen = args_popen + args
+    def _background_run(self):
+        while True:
+            try:
+                o = self._internal_report_q.get_nowait()
+                if isinstance(o, Done):
+                    self.active_jobs.remove(o.sender)
+                self.report_q.put(o)
+            except Empty:
+                pass
 
-        env = os.environ.copy()
-        env['PYTHONUNBUFFERED'] = '1'
-        if env_vars is not None:
-            env.update(env_vars)
+            if self.cancel_event.is_set():
+                with self.job_table_lock:
+                    for j in self.jobs.values():
+                        j.cancel()
+                break
 
-        process.process_object = subprocess.Popen(args=args_popen, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd, env=env)
+    def stop(self):
+        self.cancel_event.set()
 
-        def log_output(fh, *outfiles):
-            for line in iter(fh.readline, b''):
-                for f in outfiles:
-                    if f is not None:
-                        f.write(line)
-            fh.close()
-
-        t_stdout = Thread(target=log_output, args=(process.process_object.stdout, process.stdout, stdout_file), daemon=True)
-        t_stderr = Thread(target=log_output, args=(process.process_object.stderr, process.stderr, stderr_file), daemon=True)
-        t_stdout.start()
-        t_stderr.start()
-
-        self.process_table[upid] = process
-        return process
-
-    def get_process_by_id(self, upid):
-        return self.process_table[upid]
+    def any_alive(self):
+        return len(self.active_jobs) > 0
