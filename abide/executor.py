@@ -3,6 +3,10 @@ from threading import Thread, Event, Lock
 from queue import SimpleQueue, Empty
 from enum import Enum
 import attr
+import sys
+import os
+from typing import Dict, List
+import subprocess
 
 
 @attr.s(auto_attribs=True)
@@ -68,6 +72,33 @@ class Job:
 
     def run(self):
         pass
+
+
+class PythonProcessJob(Job):
+    def __init__(self, filename, args: [str] = None, env: Dict[str, str] = None, cwd=None):
+        super().__init__()
+        self.filename = filename
+        self.args = args
+        self.env = env
+        self.cwd = cwd
+        self.process = None
+
+    def run(self):
+        args = [sys.executable, str(self.filename)]
+        if self.args is not None:
+            args = args + self.args
+
+        env = os.environ.copy()
+        env['PYTHONUNBUFFERED'] = '1'
+        if self.env is not None:
+            env.update(self.env)
+
+        self.process = subprocess.Popen(args=args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=self.cwd,
+                                        env=env)
+
+        for line in iter(self.process.stdout):
+            self.emit_log_message(line)
+        self.process.stdout.close()
 
 
 class Executor:
