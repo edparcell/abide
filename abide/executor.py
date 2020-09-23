@@ -1,3 +1,4 @@
+import multiprocessing
 import uuid
 from threading import Thread, Event, Lock
 from queue import SimpleQueue, Empty
@@ -72,6 +73,26 @@ class Job:
 
     def run(self):
         pass
+
+
+class ThreadFunctionJob(Job):
+    def __init__(self, target):
+        super().__init__()
+        self.target = target
+
+    def run(self):
+        self.target()
+
+
+class MultiprocessingJob(Job):
+    def __init__(self, target):
+        super().__init__()
+        self.target = target
+
+    def run(self):
+        p = multiprocessing.Process(target=self.target)
+        p.start()
+        p.join()
 
 
 class PythonProcessJob(Job):
