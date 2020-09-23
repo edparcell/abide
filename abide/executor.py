@@ -8,6 +8,7 @@ import sys
 import os
 from typing import Dict, List
 import subprocess
+from datetime import datetime
 
 
 @attr.s(auto_attribs=True)
@@ -161,3 +162,15 @@ class Executor:
 
     def any_alive(self):
         return len(self.active_jobs) > 0
+
+    def print_messages_until_done(e, *, timeout=0.1, print_if_no_message=False, print_function=print):
+        while True:
+            try:
+                o = e.report_q.get(timeout=timeout)
+                print_function(datetime.now().isoformat(), o)
+            except Empty:
+                if print_if_no_message:
+                    print_function(datetime.now().isoformat(), "No Message")
+            if e.report_q.empty() and not e.any_alive():
+                break
+        e.stop()
