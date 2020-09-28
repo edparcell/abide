@@ -116,6 +116,8 @@ class MultiprocessingJob(Job):
         p = multiprocessing.Process(target=_run_multiprocessing, args=(self.target, process_context, self.args, self.kwargs))
         p.start()
         while p.is_alive() or not process_report_queue.empty():
+            if self.context.cancel_event.is_set(): # TODO: It would be nice not to wait for this
+                process_cancel_event.set()
             try:
                 o = process_report_queue.get(timeout=0.1)
                 self.context.emit_message(o)
@@ -146,7 +148,7 @@ class PythonProcessJob(Job):
                                         env=env)
 
         for line in iter(self.process.stdout):
-            self.emit_log_message(line)
+            self.context.emit_log_message(line)
         self.process.stdout.close()
 
 
