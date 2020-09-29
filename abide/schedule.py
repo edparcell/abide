@@ -19,7 +19,7 @@ class ScheduledJobDefinition:
     retry_wait: int = attr.ib(default=0)  # seconds
     late_start_cutoff: int = attr.ib(default=0)  # seconds
     retry_cutoff: int = attr.ib(default=None)  # seconds
-
+    action = attr.ib(default=None)
 
 @attr.s
 class ScheduledJobState:
@@ -41,7 +41,15 @@ def get_next_run(now: datetime, job_defn: ScheduledJobDefinition, job_state: Sch
 
     itr = croniter(job_defn.schedule, start_time=now)
     job_time = itr.get_prev(datetime)
-    if job_defn.late_start_cutoff is not None and job_time <= now - timedelta(seconds=job_defn.late_start_cutoff):
-        job_time = itr.get_next(datetime)
+    while True:
+        if job_state is not None:
+            if job_time <= job_state.last_run:
+                job_time = itr.get_next(datetime)
+                continue
+        if job_defn.late_start_cutoff is not None:
+            if job_time < now - timedelta(seconds=job_defn.late_start_cutoff):
+                job_time = itr.get_next(datetime)
+                continue
+        break
 
     return job_time, (job_time, 0)

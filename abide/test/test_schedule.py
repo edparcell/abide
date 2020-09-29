@@ -99,3 +99,21 @@ def test_three_retries_last_run_fail_permanently():
     when, (job_time, job_retry) = get_next_run(now, sjd, sjs)
     assert job_time == when == pd.to_datetime('9/28/2020 13:10:00')
     assert job_retry == 0
+
+
+def test_get_next_if_not_running():
+    sjd = ScheduledJobDefinition("*/5 * * * *", late_start_cutoff=0)
+    sjs = None
+    now = pd.to_datetime('9/28/2020 13:10:00')
+    when, (job_time, job_retry) = get_next_run(now, sjd, sjs)
+    assert job_time == when == pd.to_datetime('9/28/2020 13:10:00')
+    assert job_retry == 0
+
+
+def test_get_next_if_running():
+    sjd = ScheduledJobDefinition("*/5 * * * *", late_start_cutoff=0)
+    sjs = ScheduledJobState(pd.to_datetime('9/28/2020 13:10:00'), 0, None, RunState.RUNNING)
+    now = pd.to_datetime('9/28/2020 13:10:00')
+    when, (job_time, job_retry) = get_next_run(now, sjd, sjs)
+    assert job_time == when == pd.to_datetime('9/28/2020 13:15:00')
+    assert job_retry == 0
