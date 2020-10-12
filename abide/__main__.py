@@ -16,6 +16,8 @@ from nbconvert import PDFExporter
 import attr
 import click
 
+from abide.schedule import Scheduler, read_job_definitions, ScheduledJobDefinition
+
 FORMAT_STR = '%(asctime)s %(levelname)8s: P%(process)d T%(thread)d %(name)s %(module)s %(message)s'
 
 
@@ -49,92 +51,71 @@ def run_notebook(input_notebook: pathlib.Path, run_path: pathlib.Path, output_no
         f_pdf_out.write(pdf_data)
 
 
-@attr.s(auto_attribs=True)
-class TaskDefinition:
-    timespec: str
-    name: str
-    extension: str
-    filename: pathlib.Path
-
-    def get_last_scheduled_execution(self, current_time: datetime):
-        ci = croniter(self.timespec, current_time)
-        execution_time = ci.get_prev(ret_type=datetime)
-        logging.debug("Current Time: {}, Last Scheduled Execution: {}".format(current_time, execution_time))
-        return execution_time
-
-
 class TaskDirectory:
     def __init__(self, task_directory):
         self.task_directory = pathlib.Path(task_directory)
 
-    def get_schedule(self) -> Dict[str, TaskDefinition]:
-        schedule_file = self.task_directory / 'schedule.yaml'
-        with schedule_file.open() as f:
-            schedule_items = yaml.load(f, Loader=yaml.CLoader)
-            schedule = {}
-            for name, task in schedule_items.items():
-                pth = pathlib.Path(task['file'])
-                td = TaskDefinition(task['schedule'], name, pth.suffix, pth)
-                schedule[name] = td
-        return schedule
+    def get_job_definitions(self):
+        schedule_file = self.task_directory / 'new_schedule.yaml'
+        job_definitions = read_job_definitions(schedule_file)
+        return job_definitions
 
-    def get_task(self, task_name: str):
-        schedule = self.get_schedule()
-        return schedule.get(task_name)
+    def get_scheduler(self, start_time) -> Scheduler:
+        job_definitions = self.get_job_definitions()
+        scheduler = Scheduler(start_time, job_definitions)
+        return scheduler
 
-    def get_task_output_dir(self, task_name: str):
-        pth = self.task_directory / 'output' / task_name
+    def get_job_output_dir(self, job_name: str):
+        pth = self.task_directory / 'output' / job_name
         return pth.absolute()
 
-    def get_task_run_output_dir(self, task_name: str, execute_time: datetime):
-        pth = self.get_task_output_dir(task_name) / '{:%Y%m%d-%H%M%S}'.format(execute_time)
+    def get_job_run_output_dir(self, job_name: str, job_time: datetime):
+        pth = self.get_job_output_dir(job_name) / '{:%Y%m%d-%H%M%S}'.format(job_time)
         return pth.absolute()
 
-    def get_task_run_output_filename(self, task_name: str, execute_time: datetime, extension):
-        pth = self.get_task_output_dir(task_name) / '{:%Y%m%d-%H%M%S}.{}'.format(execute_time, extension)
+    def get_task_run_output_filename(self, job_name: str, job_time: datetime, extension):
+        pth = self.get_job_output_dir(job_name) / '{:%Y%m%d-%H%M%S}.{}'.format(job_time, extension)
         return pth.absolute()
 
 
-def execute_task(task_definition: TaskDefinition, task_directory: TaskDirectory, execute_time: datetime):
-    pth_task_dir = task_directory.get_task_output_dir(task_definition.name)
-    pth_task_run_dir = task_directory.get_task_run_output_dir(task_definition.name, execute_time)
+def execute_task(job: ScheduledJobDefinition, task_directory: TaskDirectory, execute_time: datetime):
+    pth_task_dir = task_directory.get_job_output_dir(job.name)
+    pth_task_run_dir = task_directory.get_job_run_output_dir(job.name, execute_time)
+
     env = os.environ.copy()
-    env['ABIDE_TASK_PATH'] = str(pth_task_dir)
-    env['ABIDE_TASK_RUN_PATH'] = str(pth_task_run_dir)
+    env['ABIDE_JOB_PATH'] = str(pth_task_dir)
+    env['ABIDE_JOB_RUN_PATH'] = str(pth_task_run_dir)
 
-    extn = task_definition.extension.lower()
-    task_filename = str(task_definition.filename)
+    task_filename = task_directory.task_directory / job.action
+    extn = task_filename.suffix
 
     if extn == '.py':
         logging.info("Executing {} {}".format(sys.executable, task_filename))
-        subprocess.run([sys.executable, task_filename], env=env)
+        subprocess.run([sys.executable, str(task_filename)], env=env)
     elif extn == '.ipynb':
         logging.info("Running notebook {}".format(task_filename))
         pth = task_directory.task_directory
-        fn_out = task_directory.get_task_run_output_filename(task_definition.name, execute_time, 'ipynb')
-        run_notebook(task_definition.filename, pth, fn_out)
+        fn_out = task_directory.get_task_run_output_filename(job.name, execute_time, 'ipynb')
+        run_notebook(task_filename, pth, fn_out)
     else:
         logging.error("Unexpected extension: {}".format(extn))
 
 
 def run_main_loop(task_directory: TaskDirectory, sleep_period=1):
-    last_run_time = datetime.utcnow()
+    scheduler = task_directory.get_scheduler(datetime.utcnow())
+
     while True:
         logging.debug("Waking up")
-        this_run_time = datetime.utcnow()
-
-        schedule = task_directory.get_schedule()
-        for task in schedule.values():
-            task_last_run_time = last_run_time
-            task_last_scheduled_execution = task.get_last_scheduled_execution(this_run_time)
-            if task_last_scheduled_execution > task_last_run_time:
-                logging.debug("Running Task {}, Last Task Run Time: {}, Last Scheduled Execution: {}".format(
-                    task.name, task_last_run_time, task_last_scheduled_execution))
-                execute_task(task, task_directory, task_last_scheduled_execution)
-
-        last_run_time = this_run_time
-        logging.debug("Sleeping for {} seconds".format(sleep_period))
-        time.sleep(sleep_period)
+        now = datetime.utcnow()
+        scheduler.set_time(now)
+        job_name, when, (job_time, retry) = scheduler.get_next_run()
+        if when is None:
+            logging.debug("Running {} for {} (retry {}) at {}".format(job_name, job_time, retry, now))
+            job_definition = scheduler.job_definitions[job_name]
+            execute_task(job_definition, task_directory, job_time)
+        else:
+            time.sleep(sleep_period)
+            logging.debug("Sleeping for {} seconds".format(sleep_period))
 
 
 @click.group()
@@ -158,20 +139,21 @@ def tasks():
 def list_tasks(task_directory: str, verbose: int):
     init_logging(verbose)
     task_directory = TaskDirectory(task_directory)
-    schedule = task_directory.get_schedule()
-    for task in schedule.values():
-        print('{}\t{}\t{}'.format(task.name, task.timespec, task.filename))
+    job_definitions = task_directory.get_job_definitions()
+    for name, job_definition in job_definitions.items():
+        print("{}\t{}\t{}".format(job_definition.name, job_definition.schedule, job_definition.action))
 
 
 @tasks.command(name='run')
 @click.argument('task_name')
 @click.option('-d', '--task_directory', default='.', type=click.Path(exists=True))
 @click.option('-v', '--verbose', count=True)
-def list_tasks(task_directory: str, verbose: int, task_name: str):
+def run_task(task_directory: str, verbose: int, task_name: str):
     init_logging(verbose)
     task_directory = TaskDirectory(task_directory)
-    task = task_directory.get_task(task_name)
-    execute_task(task, task_directory, datetime.utcnow())
+    scheduler = task_directory.get_scheduler(None)
+    job = scheduler.job_definitions[task_name]
+    execute_task(job, task_directory, datetime.utcnow())
 
 
 @top_level.command()
