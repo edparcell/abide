@@ -19,11 +19,33 @@ class RunState(Enum):
 @attr.s
 class ScheduledJobDefinition:
     schedule: str = attr.ib()  # Cron expression
-    retries: int = attr.ib(default=1)
+    name: str = attr.ib(default=None)
+    retries: int = attr.ib(default=0)
     retry_wait: int = attr.ib(default=0)  # seconds
-    late_start_cutoff: int = attr.ib(default=0)  # seconds
-    retry_cutoff: int = attr.ib(default=None)  # seconds
+    late_start_cutoff: int = attr.ib(default=None)  # seconds (None = forever)
+    run_all_on_late_start: bool = attr.ib(default=False)
+    catchup_on_startup: bool = attr.ib(default=False)
     action = attr.ib(default=None)
+
+    def next_run(self, time):
+        itr = croniter(self.schedule, time)
+        return itr.get_next(datetime)
+
+    def current_or_next_run(self, time):
+        itr = croniter(self.schedule, time)
+        itr.get_prev(datetime)
+        return itr.get_next(datetime)
+
+    def prev_run(self, time):
+        itr = croniter(self.schedule, time)
+        return itr.get_prev(datetime)
+
+    def current_or_prev_run(self, time):
+        itr = croniter(self.schedule, time)
+        itr.get_next(datetime)
+        return itr.get_prev(datetime)
+
+
 
 @attr.s
 class ScheduledJobState:
@@ -33,30 +55,11 @@ class ScheduledJobState:
     last_state: RunState = attr.ib()
 
 
-def get_next_run(now: datetime, job_defn: ScheduledJobDefinition, job_state: ScheduledJobState):
-    if job_state is not None:
-        if job_state.last_state == RunState.FAIL:
-            job_time = job_state.last_run
-            next_retry = job_state.last_retry + 1
-            if next_retry < job_defn.retries:
-                next_run_time = job_state.last_finish_time + timedelta(seconds=job_defn.retry_wait)
-                if job_defn.retry_cutoff is None or next_run_time < job_time + timedelta(seconds=job_defn.retry_cutoff):
-                    return next_run_time, (job_time, next_retry)
-
-    itr = croniter(job_defn.schedule, start_time=now)
-    job_time = itr.get_prev(datetime)
-    while True:
-        if job_state is not None:
-            if job_time <= job_state.last_run:
-                job_time = itr.get_next(datetime)
-                continue
-        if job_defn.late_start_cutoff is not None:
-            if job_time < now - timedelta(seconds=job_defn.late_start_cutoff):
-                job_time = itr.get_next(datetime)
-                continue
-        break
-
-    return job_time, (job_time, 0)
+def enum_lookup(enum_class, label):
+    for member in enum_class:
+        if label.lower() == member.name.lower():
+            return member
+    raise KeyError("{} is not a member of {}".format(label, enum_class))
 
 
 def get_file_obj(path_or_buf, mode=None):
@@ -77,7 +80,7 @@ def read_job_definitions(path_or_buf):
         job_definitions = yaml.load(f, Loader=yaml.CLoader)
     res = {}
     for name, job_definition in job_definitions.items():
-        res[name] = ScheduledJobDefinition(**job_definition)
+        res[name] = ScheduledJobDefinition(name=name, **job_definition)
     return res
 
 
@@ -86,6 +89,7 @@ class Scheduler:
         self.job_definitions = job_definitions or {}
         self.job_states = {}
         self.time = start_time
+        self.next_from_startup = {name: job_definition.current_or_next_run(start_time) for name, job_definition in job_definitions.items()}
 
     def write_state(self, path_or_buf):
         with get_file_obj(path_or_buf, 'w') as f:
@@ -117,11 +121,12 @@ class Scheduler:
                 last_run=datetime.fromisoformat(job_state_dict['last_run']),
                 last_retry=job_state_dict['last_retry'],
                 last_finish_time=last_finish_time,
-                last_state=RunState[job_state_dict['last_state']])
+                last_state=enum_lookup(RunState, job_state_dict['last_state']))
         self.job_states = job_states
 
     def add_job(self, name, job_definition):
         self.job_definitions[name] = job_definition
+        self.next_from_startup[name] = job_definition.current_or_next_run(self.time)
 
     def set_time(self, time):
         self.time = time
@@ -138,12 +143,91 @@ class Scheduler:
         res_job_name = None
         res_job_time = None
         res_retry = None
-        for name, job_definition in self.job_definitions.items():
-            job_state = self.job_states.get(name)
-            when, (job_time, retry) = get_next_run(self.time, job_definition, job_state)
+        first = True
+        for name in self.job_definitions.keys():
+            for job_time, retry, when in self.get_active_runs_for_job(name):
+                newer = res_when is not None and (when is None or when < res_when)
+                if first or newer:
+                    res_when = when
+                    res_job_name = name
+                    res_job_time = job_time
+                    res_retry = retry
+                first = False
+        return res_job_name, res_when, (res_job_time, res_retry)
+
+    def get_next_run_for_job(self, job_name):
+        res_when = None
+        res_job_time = None
+        res_retry = None
+        for job_time, retry, when in self.get_active_runs_for_job(job_name):
             if res_when is None or when < res_when:
                 res_when = when
-                res_job_name = name
                 res_job_time = job_time
                 res_retry = retry
-        return res_job_name, res_when, (res_job_time, res_retry)
+        return res_when, (res_job_time, res_retry)
+
+    def get_active_runs_for_job(self, job_name):
+        job_definition: ScheduledJobDefinition = self.job_definitions[job_name]
+        job_state: ScheduledJobState = self.job_states.get(job_name)
+
+        next_from_startup = self.next_from_startup[job_name]
+        prev_from_now = job_definition.current_or_prev_run(self.time)
+        next_from_now = job_definition.current_or_next_run(self.time)
+
+        if job_state is None:
+            next_from_last = next_from_startup
+        else:
+            if job_state.last_state == RunState.FAIL and job_state.last_retry < job_definition.retries:
+                next_from_last = job_state.last_run
+            else:
+                next_from_last = job_definition.next_run(job_state.last_run)
+
+        first_active = next_from_last
+        if job_definition.catchup_on_startup:
+            first_active = max(first_active, next_from_startup)
+        else:
+            first_active = max(first_active, prev_from_now)
+
+        if job_definition.late_start_cutoff is not None:
+            earliest_possible = self.time - timedelta(seconds=job_definition.late_start_cutoff)
+            next_from_earliest_possible = job_definition.current_or_next_run(earliest_possible)
+            first_active = max(first_active, next_from_earliest_possible)
+
+        def get_retry_and_run_time_for_job(job):
+            if job_state is not None and job == job_state.last_run:
+                if job_state.last_state == RunState.RUNNING:
+                    retry_ = None
+                    run_time_ = None
+                else:
+                    retry_ = job_state.last_retry + 1
+                    run_time_ = job_state.last_finish_time + timedelta(seconds=job_definition.retry_wait)
+            else:
+                retry_ = 0
+                run_time_ = job
+
+            if run_time_ is not None and run_time_ <= self.time:
+                run_time_ = None
+
+            return retry_, run_time_
+
+        actives = []
+        active = first_active
+        while active <= self.time:
+            retry, run_time = get_retry_and_run_time_for_job(active)
+            if run_time is None:
+                run_time_ok = True
+            elif job_definition.late_start_cutoff is None:
+                run_time_ok = True
+            elif run_time < active + timedelta(seconds=job_definition.late_start_cutoff):
+                run_time_ok = True
+            else:
+                run_time_ok = False
+            if run_time_ok and retry is not None:
+                actives.append((active, retry, run_time))
+            active = job_definition.next_run(active)
+        if len(actives) == 0:
+            job = max(next_from_last, next_from_now)
+            retry, run_time = get_retry_and_run_time_for_job(job)
+            actives.append((job, retry, run_time))
+
+        return actives
