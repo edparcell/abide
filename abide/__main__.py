@@ -16,7 +16,7 @@ from nbconvert import PDFExporter
 import attr
 import click
 
-from abide.schedule import Scheduler, read_job_definitions, ScheduledJobDefinition
+from abide.schedule import Scheduler, read_job_definitions, ScheduledJobDefinition, RunState
 
 FORMAT_STR = '%(asctime)s %(levelname)8s: P%(process)d T%(thread)d %(name)s %(module)s %(message)s'
 
@@ -110,12 +110,14 @@ def run_main_loop(task_directory: TaskDirectory, sleep_period=1):
         scheduler.set_time(now)
         job_name, when, (job_time, retry) = scheduler.get_next_run()
         if when is None:
-            logging.debug("Running {} for {} (retry {}) at {}".format(job_name, job_time, retry, now))
+            logging.info("Running {} for {} (retry {}) at {}".format(job_name, job_time, retry, now))
             job_definition = scheduler.job_definitions[job_name]
+            scheduler.set_running(job_name, job_time, retry)
             execute_task(job_definition, task_directory, job_time)
+            scheduler.set_complete(job_name, RunState.COMPLETE)
         else:
-            time.sleep(sleep_period)
             logging.debug("Sleeping for {} seconds".format(sleep_period))
+            time.sleep(sleep_period)
 
 
 @click.group()
