@@ -56,7 +56,7 @@ class TaskDirectory:
         self.task_directory = pathlib.Path(task_directory)
 
     def get_job_definitions(self):
-        schedule_file = self.task_directory / 'new_schedule.yaml'
+        schedule_file = self.task_directory / 'schedule.yaml'
         job_definitions = read_job_definitions(schedule_file)
         return job_definitions
 
@@ -102,11 +102,11 @@ def execute_task(job: ScheduledJobDefinition, task_directory: TaskDirectory, exe
 
 
 def run_main_loop(task_directory: TaskDirectory, sleep_period=1):
-    scheduler = task_directory.get_scheduler(datetime.utcnow())
+    scheduler = task_directory.get_scheduler(datetime.now())
 
     while True:
         logging.debug("Waking up")
-        now = datetime.utcnow()
+        now = datetime.now()
         scheduler.set_time(now)
         job_name, when, (job_time, retry) = scheduler.get_next_run()
         if when is None:
@@ -127,7 +127,7 @@ def top_level():
 
 @top_level.command('time')
 def show_time():
-    print(datetime.utcnow())
+    print(datetime.now())
 
 
 @top_level.group()
@@ -155,7 +155,7 @@ def run_task(task_directory: str, verbose: int, task_name: str):
     task_directory = TaskDirectory(task_directory)
     scheduler = task_directory.get_scheduler(None)
     job = scheduler.job_definitions[task_name]
-    execute_task(job, task_directory, datetime.utcnow())
+    execute_task(job, task_directory, datetime.now())
 
 
 @top_level.command()
