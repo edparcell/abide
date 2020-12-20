@@ -2,7 +2,8 @@ import logging
 import time
 from datetime import datetime
 
-from abide.__main__ import TaskDirectory, execute_task
+from abide.runners import execute_task
+from abide.taskdirectory import TaskDirectory
 from abide.schedule import RunState
 
 

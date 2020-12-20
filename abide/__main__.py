@@ -1,19 +1,12 @@
 import logging
-import os
-import pathlib
-import subprocess
-import sys
 import time
 from datetime import datetime
 
-import nbformat
-from nbconvert.preprocessors import ExecutePreprocessor
-from nbconvert import PDFExporter
-
 import click
 
-from abide.schedule import Scheduler, read_job_definitions, ScheduledJobDefinition
+from abide.runners import execute_task
 from abide.server import run_server_main_loop
+from abide.taskdirectory import TaskDirectory
 
 FORMAT_STR = '%(asctime)s %(levelname)8s: P%(process)d T%(thread)d %(name)s %(module)s %(message)s'
 
@@ -31,71 +24,6 @@ def init_logging(verbose):
     logging.Formatter.converter = time.gmtime
     logging.root.addHandler(handler)
     logging.root.setLevel(loglevel)
-
-
-def run_notebook(input_notebook: pathlib.Path, run_path: pathlib.Path, output_notebook: pathlib.Path, timeout: int=600):
-    with open(input_notebook) as f_in:
-        nb = nbformat.read(f_in, as_version=4)
-    ep = ExecutePreprocessor(timeout=timeout, kernel_name='python3')
-    ep.preprocess(nb, {'metadata': {'path': run_path}})
-    with open(output_notebook, 'w', encoding='utf-8') as f_out:
-        nbformat.write(nb, f_out)
-
-    pdf_exporter = PDFExporter()
-    pdf_exporter.template_name = 'classic'
-    pdf_data, resources = pdf_exporter.from_notebook_node(nb)
-    with open(output_notebook.with_suffix(".pdf"), 'wb') as f_pdf_out:
-        f_pdf_out.write(pdf_data)
-
-
-class TaskDirectory:
-    def __init__(self, task_directory):
-        self.task_directory = pathlib.Path(task_directory)
-
-    def get_job_definitions(self):
-        schedule_file = self.task_directory / 'schedule.yaml'
-        job_definitions = read_job_definitions(schedule_file)
-        return job_definitions
-
-    def get_scheduler(self, start_time) -> Scheduler:
-        job_definitions = self.get_job_definitions()
-        scheduler = Scheduler(start_time, job_definitions)
-        return scheduler
-
-    def get_job_output_dir(self, job_name: str):
-        pth = self.task_directory / 'output' / job_name
-        return pth.absolute()
-
-    def get_job_run_output_dir(self, job_name: str, job_time: datetime):
-        pth = self.get_job_output_dir(job_name) / '{:%Y%m%d-%H%M%S}'.format(job_time)
-        return pth.absolute()
-
-    def get_task_run_output_filename(self, job_name: str, job_time: datetime, extension):
-        pth = self.get_job_output_dir(job_name) / '{:%Y%m%d-%H%M%S}.{}'.format(job_time, extension)
-        return pth.absolute()
-
-
-def execute_task(job: ScheduledJobDefinition, task_directory: TaskDirectory, execute_time: datetime):
-    pth_task_dir = task_directory.get_job_output_dir(job.name)
-    pth_task_run_dir = task_directory.get_job_run_output_dir(job.name, execute_time)
-
-    env = os.environ.copy()
-    env['ABIDE_JOB_PATH'] = str(pth_task_dir)
-    env['ABIDE_JOB_RUN_PATH'] = str(pth_task_run_dir)
-
-    task_filename = task_directory.task_directory / job.action
-    extn = task_filename.suffix
-
-    if extn == '.py':
-        logging.info("Executing {} {}".format(sys.executable, task_filename))
-        subprocess.run([sys.executable, str(task_filename)], env=env)
-    elif extn == '.ipynb':
-        logging.info("Running notebook {}".format(task_filename))
-        pth = task_directory.task_directory
-        fn_out = task_directory.get_task_run_output_filename(job.name, execute_time, 'ipynb')
-        run_notebook(task_filename, pth, fn_out)
-    else:
-        logging.error("Unexpected extension: {}".format(extn))
 
 
 @click.group()
