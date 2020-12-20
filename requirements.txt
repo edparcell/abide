@@ -8,3 +8,4 @@ click~=7.1.2
 croniter~=0.3.30
 nbconvert~=5.6.1
 setuptools~=49.6.0
+peewee~=3.14.0
